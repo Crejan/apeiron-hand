@@ -3,7 +3,7 @@ site_name = "Apeiron"
 site_description = "Open driver, tooling and protocol specification for the Wuji Hand 2"
 docs_dir = "docs"
 # Set to the GitHub Pages URL of your fork, e.g. "https://<org>.github.io/apeiron/"
-# site_url = "https://apeiron.github.io/apeiron/"
+site_url = "https://crejan.github.io/apeiron-hand/"
 nav = [
   { "Home" = "index.md" },
   { "Specification" = [
