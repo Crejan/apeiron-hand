@@ -1,0 +1,13 @@
+{
+  "name": "vulcan",
+  "description": "Vulcan salute: fingers straight, index+middle and ring+pinky paired",
+  "joints": {
+    "thumb":  [-0.5, 0.1, 0.0, 0.0],
+    "index":  [0.0, -0.2, 0.0, 0.0],
+    "middle": [0.0, -0.2, 0.0, 0.0],
+    "ring":   [0.0, 0.35, 0.0, 0.0],
+    "pinky":  [0.0, 0.55, 0.0, 0.0]
+  },
+  "secs": 1.5,
+  "hold": 1.0
+}

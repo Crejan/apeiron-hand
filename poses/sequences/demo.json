@@ -1,0 +1,14 @@
+{
+  "name": "demo",
+  "description": "Gesture tour",
+  "loop": 1,
+  "steps": [
+    { "pose": "open",       "secs": 1.5, "hold": 1.0 },
+    { "pose": "thumbs_up",  "secs": 1.5, "hold": 1.5 },
+    { "pose": "victory",    "secs": 1.5, "hold": 1.5 },
+    { "pose": "vulcan",     "secs": 1.5, "hold": 1.5 },
+    { "pose": "ok",         "secs": 1.5, "hold": 1.5 },
+    { "pose": "rock",       "secs": 1.5, "hold": 1.5 },
+    { "pose": "open",       "secs": 1.5, "hold": 1.0 }
+  ]
+}

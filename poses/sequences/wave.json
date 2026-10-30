@@ -1,0 +1,12 @@
+{
+  "name": "wave",
+  "description": "Finger wave, endless",
+  "loop": 0,
+  "steps": [
+    { "pose": "point",      "secs": 0.6, "hold": 0.2 },
+    { "pose": "victory",    "secs": 0.6, "hold": 0.2 },
+    { "pose": "three",      "secs": 0.6, "hold": 0.2 },
+    { "pose": "four",       "secs": 0.6, "hold": 0.2 },
+    { "pose": "open",       "secs": 0.6, "hold": 0.4 }
+  ]
+}

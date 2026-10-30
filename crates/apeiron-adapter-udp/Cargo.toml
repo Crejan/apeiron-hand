@@ -1,0 +1,22 @@
+[package]
+name = "apeiron-adapter-udp"
+description = "Reference middleware adapter: drives the hand's control loop over UDP with newline-delimited JSON"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+apeiron-driver.workspace = true
+apeiron-protocol.workspace = true
+tokio = { workspace = true, features = ["net"] }
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "apeiron-udp-adapter"
+path = "src/main.rs"

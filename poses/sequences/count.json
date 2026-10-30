@@ -1,0 +1,14 @@
+{
+  "name": "count",
+  "description": "Counting one to five",
+  "loop": 1,
+  "steps": [
+    { "pose": "fist",       "secs": 1.5, "hold": 1.0 },
+    { "pose": "point",      "secs": 1.0, "hold": 1.0 },
+    { "pose": "victory",    "secs": 1.0, "hold": 1.0 },
+    { "pose": "three",      "secs": 1.0, "hold": 1.0 },
+    { "pose": "four",       "secs": 1.0, "hold": 1.0 },
+    { "pose": "spread",     "secs": 1.0, "hold": 1.0 },
+    { "pose": "open",       "secs": 1.5, "hold": 1.0 }
+  ]
+}

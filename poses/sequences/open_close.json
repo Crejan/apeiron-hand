@@ -1,0 +1,9 @@
+{
+  "name": "open_close",
+  "description": "Open and close, endless",
+  "loop": 0,
+  "steps": [
+    { "pose": "open",       "secs": 1.2, "hold": 0.5 },
+    { "pose": "fist",       "secs": 1.2, "hold": 0.5 }
+  ]
+}

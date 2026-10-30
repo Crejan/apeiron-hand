@@ -1,0 +1,13 @@
+{
+  "name": "open",
+  "description": "Open hand, all fingers straight",
+  "joints": {
+    "thumb":  [-0.3, -0.45, 0.1, 0.15],
+    "index":  [0.0, 0.0, 0.0, 0.0],
+    "middle": [0.0, 0.0, 0.0, 0.0],
+    "ring":   [0.0, 0.0, 0.0, 0.0],
+    "pinky":  [0.0, 0.0, 0.0, 0.0]
+  },
+  "secs": 1.5,
+  "hold": 1.0
+}

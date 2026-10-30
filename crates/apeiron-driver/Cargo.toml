@@ -1,0 +1,20 @@
+[package]
+name = "apeiron-driver"
+description = "Driver for the Wuji Hand 2 over Zenoh: connection, telemetry, parameters, cyclic control with pluggable middleware, commissioning procedures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+apeiron-protocol.workspace = true
+zenoh.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true

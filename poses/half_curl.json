@@ -1,0 +1,13 @@
+{
+  "name": "half_curl",
+  "description": "Half closed (pre-grasp)",
+  "joints": {
+    "thumb":  [0.2, -0.6, 0.4, 0.4],
+    "index":  [0.6, 0.0, 0.7, 0.6],
+    "middle": [0.6, 0.0, 0.7, 0.6],
+    "ring":   [0.6, 0.0, 0.7, 0.6],
+    "pinky":  [0.6, 0.05, 0.7, 0.6]
+  },
+  "secs": 1.5,
+  "hold": 1.0
+}
