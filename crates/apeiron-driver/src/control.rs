@@ -508,7 +508,10 @@ pub mod rt {
         notes
     }
 
+    // `time_t`/`c_long` are i64 on 64-bit Linux, so these casts look redundant there but are
+    // needed on 32-bit targets.
     #[cfg(target_os = "linux")]
+    #[allow(clippy::unnecessary_cast)]
     pub fn now_ns() -> i64 {
         let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
         unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
@@ -516,6 +519,7 @@ pub mod rt {
     }
 
     #[cfg(target_os = "linux")]
+    #[allow(clippy::unnecessary_cast)]
     pub fn sleep_until_ns(t: i64) {
         let ts = libc::timespec { tv_sec: (t / 1_000_000_000) as libc::time_t, tv_nsec: (t % 1_000_000_000) as libc::c_long };
         unsafe { while libc::clock_nanosleep(libc::CLOCK_MONOTONIC, libc::TIMER_ABSTIME, &ts, std::ptr::null_mut()) == libc::EINTR {} }
