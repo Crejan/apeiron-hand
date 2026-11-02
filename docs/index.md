@@ -21,8 +21,7 @@ sensors, firmware update and factory-mode resources are listed but not exercised
 
 ## Safety
 
-The hand moves with real force. Everything that moves it requires `--allow-motion` on the
-command line and runs with a current limit of 0.3 A per joint unless raised explicitly.
+The hand moves with real force. Everything that moves it runs with a current limit of 0.3 A per joint unless raised explicitly.
 Keep the fingers free and unloaded during commissioning. The hand stops its motors by
 itself when the command stream pauses.
 

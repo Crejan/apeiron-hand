@@ -27,12 +27,12 @@ ip addr add 192.168.1.50/24 dev <iface>            # hand: 192.168.1.111 (right)
 target/release/apeiron scan
 target/release/apeiron status
 target/release/apeiron telemetry
-target/release/apeiron --allow-motion checkup       # self-test + tuning → profiles/<serial>.json
-target/release/apeiron --allow-motion sequence demo
+target/release/apeiron checkup       # self-test + tuning → profiles/<serial>.json
+target/release/apeiron sequence demo
 ```
 
-Anything that moves the hand needs `--allow-motion` and runs with a 0.3 A current limit
-by default. Keep the fingers free.
+Everything that moves the hand runs with a 0.3 A current limit per joint by default and
+clamps targets to the mechanical range; `--dry-run` previews a motion. Keep the fingers free.
 
 ## Workspace
 

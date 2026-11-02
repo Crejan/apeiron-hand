@@ -29,6 +29,31 @@ pub fn trajectory(traj: &Trajectory) {
     }
 }
 
+/// Per-joint motion quality of a run (joints that moved for at least 0.2 s).
+pub fn motion_quality(q: &[apeiron_driver::control::JointQuality]) {
+    let moved: Vec<(usize, &apeiron_driver::control::JointQuality)> =
+        q.iter().enumerate().filter(|(_, j)| j.moving_samples >= 200).collect();
+    if moved.is_empty() {
+        return;
+    }
+    println!(
+        "{:<10} {:>8} {:>10} {:>9} {:>9} {:>8}  {:>7}  (v noise = velocity RMS at rest)",
+        "moving", "v tgt", "v ripple", "v noise", "q err", "I ripple", "I peak"
+    );
+    for (i, j) in moved {
+        println!(
+            "{:<10} {:>8.3} {:>10.3} {:>9.3} {:>9.4} {:>8.3}  {:>7.3}",
+            JointId::from_index(i).unwrap().label(),
+            j.target_velocity,
+            j.velocity_ripple,
+            j.rest_velocity_noise,
+            j.position_error,
+            j.current_ripple,
+            j.peak_current,
+        );
+    }
+}
+
 pub fn set_reply(what: &str, r: &SetReply) {
     if r.all_ok() {
         println!("{what}: ok ({}/{} joints)", r.ok, r.total);

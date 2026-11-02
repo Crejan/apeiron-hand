@@ -20,9 +20,8 @@ no I/O; the driver has no terminal output; the CLI has no Zenoh calls. Put chang
 - Short doc comments on public items; explain *why* when the code cannot.
 - Tests only where they prove behaviour, preferably against bytes captured from a device
   (see `apeiron-protocol/src/messages.rs`). No tests that merely restate an interface.
-- Everything that can move the hand must stay behind an explicit opt-in (`--allow-motion`
-  in the CLI, an explicit `arm`/`run`/`start` in the driver) and respect the current
-  limit.
+- Everything that can move the hand must respect the current limit, clamp targets to the
+  mechanical range and keep `--dry-run` working.
 
 ## Documentation
 

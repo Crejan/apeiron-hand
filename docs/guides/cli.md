@@ -12,7 +12,6 @@ apeiron [GLOBAL FLAGS] <COMMAND> [ARGS]
 | `--serial <SN>` | from liveliness | select a hand when several answer |
 | `--poses-dir <DIR>` | `$APEIRON_POSES`, `./poses`, `../poses` | pose and sequence files |
 | `--profiles-dir <DIR>` | `$APEIRON_PROFILES`, `./profiles`, `../profiles` | hand profiles |
-| `--allow-motion` | off | required by every command that enables the motors |
 | `--dry-run` | off | print the trajectory, do not connect |
 | `--max-effort <A>` | 0.3 | current limit written before enabling |
 | `--max-speed <rad/s>` | 1.0 | ramps are stretched to respect this |
@@ -34,7 +33,7 @@ apeiron [GLOBAL FLAGS] <COMMAND> [ARGS]
 | `capabilities [--resources] [--nodes]` | the device's self-description: summary, optionally the resource table and node list |
 | `get <PATH>` | GET any resource, e.g. `get index/S1/od/pos_rad_jnt_enc2`; scalars are decoded |
 | `poses` | list poses and sequences |
-| `profile [JOINT --kp --kd --effort-limit --effort-bias]` | show or edit the hand profile |
+| `profile [JOINT --kp --kd --effort-limit --effort-bias --friction-ff]` | show or edit the hand profile |
 
 ## State-changing commands without motion
 
@@ -43,17 +42,19 @@ apeiron [GLOBAL FLAGS] <COMMAND> [ARGS]
 | `set <PATH> <HEX>` | SET with a raw payload |
 | `action <PATH>` | action (SET with empty payload) |
 | `enable`, `disable`, `clear-fault` | the three common actions |
+| `reset` | safe state: motors off, `control_mode` 1 everywhere, faults cleared, default current limit and gains |
 | `ip [ADDRESS] [--reboot]` | show the stored IPv4 address and data port; with an address, store a new one (active after reboot) |
 | `save-pose <NAME> [--description TEXT]` | store the current joint positions as a pose file |
 
 `enable` on its own produces no torque; the hand needs a command stream for that.
 
-## Motion commands (`--allow-motion`)
+## Motion commands
 
 | Command | Description |
 |---|---|
 | `hold [--secs N]` | hold the current position |
 | `move <JOINT=ANGLE>... [--secs N] [--hold N]` | move joints by index or label (`index_S1=20deg`, `all=0`) |
+| `effort <JOINT=A>... [--secs N]` | open-loop test: constant current on the given joints, no feedback (the joint runs to its stop) |
 | `pose <NAME> [--secs N] [--hold N]` | drive to a pose file |
 | `sequence <NAME> [--loop N]` | play a sequence (0 = until Ctrl-C) |
 | `selfcheck [--delta RAD] [--secs-per-joint S]` | mechanical and encoder self-test |
@@ -61,10 +62,13 @@ apeiron [GLOBAL FLAGS] <COMMAND> [ARGS]
 | `bias [--amps A] [--secs S] [--no-save]` | preload test |
 | `checkup [--retune] [--skip-tune] [--skip-bias] [--kp-list] [--kd-list]` | self-test, tuning, preload, profile |
 
-Per-joint overrides for one run: `--effort-override index_S2=0.1` and `--bias index_S4=-0.05`
-(both repeatable); per-joint gains live in the profile (`apeiron profile index_S4 --kp 2 --kd 0.15`).
-`--gains KP:KD` overrides the gains of all joints and ignores the profile. After every motion
-command the tool prints the timing statistics of the command loop and the reached positions.
+Per-joint overrides for one run: `--effort-override index_S2=0.1`, `--bias index_S4=-0.05` and
+`--friction index_S1=0.08` (all repeatable), `--friction-ff 0.08` for all joints; per-joint gains live in the profile (`apeiron profile index_S4 --kp 2 --kd 0.15`).
+`--gains KP:KD` overrides the gains of all joints and ignores the profile. `--mode` selects the
+control mode: `position` (default, MIT law), `velocity`, `effort`, `impedance:KP:KD` or
+`firmware:N[:topic]` (firmware controllers on `cmd/<topic>`, see the control specification). `--only JOINT`
+(repeatable) sets the current limit of every other joint to zero. After every motion command the tool prints the
+timing statistics of the command loop, a motion-quality line per moving joint and the reached positions.
 
 ## Offline
 

@@ -42,11 +42,15 @@ pub struct JointProfile {
     /// suppresses limit cycles in joints with backlash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_bias: Option<f32>,
+    /// Coulomb friction feed-forward in A, applied as `friction_ff · sign(v_des)` while the
+    /// target moves. Breaks stick-slip of soft impedance gains on the base joints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction_ff: Option<f32>,
 }
 
 impl Default for JointProfile {
     fn default() -> Self {
-        JointProfile { kp: DEFAULT_KP, kd: DEFAULT_KD, max_effort: None, effort_bias: None }
+        JointProfile { kp: DEFAULT_KP, kd: DEFAULT_KD, max_effort: None, effort_bias: None, friction_ff: None }
     }
 }
 
@@ -56,11 +60,17 @@ pub struct Gains {
     pub mit: [MitParam; NUM_JOINTS],
     pub effort_limit: [f32; NUM_JOINTS],
     pub effort_bias: [f32; NUM_JOINTS],
+    pub friction_ff: [f32; NUM_JOINTS],
 }
 
 impl Gains {
     pub fn uniform(kp: f32, kd: f32, effort_limit: f32) -> Gains {
-        Gains { mit: [MitParam { kp, kd }; NUM_JOINTS], effort_limit: [effort_limit; NUM_JOINTS], effort_bias: [0.0; NUM_JOINTS] }
+        Gains {
+            mit: [MitParam { kp, kd }; NUM_JOINTS],
+            effort_limit: [effort_limit; NUM_JOINTS],
+            effort_bias: [0.0; NUM_JOINTS],
+            friction_ff: [0.0; NUM_JOINTS],
+        }
     }
 }
 
@@ -114,6 +124,7 @@ impl HandProfile {
                     g.effort_limit[i] = g.effort_limit[i].min(e);
                 }
                 g.effort_bias[i] = jp.effort_bias.unwrap_or(0.0);
+                g.friction_ff[i] = jp.friction_ff.unwrap_or(0.0);
             }
         }
         g

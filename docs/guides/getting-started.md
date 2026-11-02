@@ -53,7 +53,7 @@ On a PREEMPT_RT kernel with isolated CPUs, give the command loop a fixed priorit
 dedicated core:
 
 ```sh
-apeiron --allow-motion --rt-prio 80 --cpu 10 hold --secs 5
+apeiron --rt-prio 80 --cpu 10 hold --secs 5
 ```
 
 Requires `ulimit -r` to allow the priority. Without it the loop still runs with

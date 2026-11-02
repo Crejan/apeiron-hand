@@ -7,7 +7,7 @@ freely and keep a hand on the power switch.
 
 Safety defaults for all procedures:
 
-- `--allow-motion` is mandatory; without it the command refuses to arm the motors.
+- `--dry-run` prints what a motion command would do without arming the motors.
 - The current limit is set to `--max-effort` (0.3 A) on every joint before enabling.
 - Gains are written from the profile, or 3 / 0.2 if the joint has no entry.
 - Before enabling, every joint is checked for a frozen joint encoder (see
@@ -17,7 +17,7 @@ Safety defaults for all procedures:
 ## Self-test — `apeiron selfcheck`
 
 ```sh
-apeiron --allow-motion selfcheck                  # ±0.08 rad, 1.3 s per joint, ≈ 30 s
+apeiron selfcheck                  # ±0.08 rad, 1.3 s per joint, ≈ 30 s
 ```
 
 Each joint in turn is deflected by 0.08 rad (direction away from the nearer limit), held,
@@ -39,7 +39,7 @@ moves with the limit saturated is worth a look.
 ## Gain tuning — `apeiron tune`
 
 ```sh
-apeiron --allow-motion tune --joint index_S1 --kp-list 1.5,2,3,4,6 --kd-list 0.1,0.2,0.3 --save-profile
+apeiron tune --joint index_S1 --kp-list 1.5,2,3,4,6 --kd-list 0.1,0.2,0.3 --save-profile
 ```
 
 For every (kp, kd) candidate the joint receives a position step of `--step` (0.15 rad),
@@ -59,7 +59,7 @@ unchanged.
 ## Preload test — `apeiron bias`
 
 ```sh
-apeiron --allow-motion bias --amps 0.05 --secs 3
+apeiron bias --amps 0.05 --secs 3
 ```
 
 All joints hold their position three times: with feed-forward effort 0, +0.05 A and
@@ -70,7 +70,7 @@ removes the limit cycle that gear backlash causes in some fingertip joints.
 ## Everything — `apeiron checkup`
 
 ```sh
-apeiron --allow-motion --rt-prio 80 --cpu 10 checkup
+apeiron --rt-prio 80 --cpu 10 checkup
 ```
 
 1. Self-test; stops with exit code 2 if it fails.
@@ -102,3 +102,40 @@ the profile for one run.
 - `enc2` following `enc1` only partially, or an `e1=e2` failure, points at the
   joint-side encoder or its calibration record (`enc2_calib_result`).
 - A frozen encoder warning is cleared by power-cycling the hand.
+
+## Motion quality
+
+Every motion command prints, per moving joint, the target velocity, the RMS deviation of the
+measured velocity from it (`v ripple`), the velocity RMS while the joint is meant to stand
+still (`v noise`), the RMS position error (`q err`), the current ripple and the peak current.
+Reference values from a base joint (`ring_S1`, 1 rad travel in 3 s) on the tested hand:
+
+| kp / kd | v ripple rad/s | q err rad | I ripple A | remark |
+|---|---|---|---|---|
+| 3 / 0 | 0.57 | 0.015 | 0.07 | strong rattle |
+| 3 / 0.05 | 0.24 | 0.020 | 0.04 | |
+| 3 / 0.2 (default) | 0.12–0.15 | 0.005–0.013 | 0.05 | |
+| 3 / 0.4 | 0.08 | 0.018 | 0.06 | |
+| 3 / 0.8 | 0.16 | 0.007 | 0.17 | hum, idle joints drift |
+| 6 / 0 | 0.59 | 0.009 | 0.10 | |
+
+What the numbers mean on this hardware:
+
+- The position error stays within a few hundredths of a radian even at kd 0: the hand follows
+  the trajectory. The audible roughness is a velocity ripple around the trajectory, not
+  stick-slip.
+- Driving the joint open loop with a constant current (`apeiron effort ring_S1=0.08`) is
+  smooth. The ripple appears only under closed-loop control and is set almost entirely by
+  `kd`; `kp`, the ramp speed, the current limit (0.3 vs 0.45 A), friction feed-forward and an
+  injected dither do not change it.
+- `kd` above ≈ 0.4 amplifies velocity measurement noise into current noise: the joints hum
+  and idle joints start to creep. The usable window is kd 0.2–0.4 with kp 3.
+- The motor behind a 50.4:1 gear has 5 pole pairs; at 0.3 rad/s joint speed its cogging
+  frequency is in the 50–100 Hz range, which matches the audible hum. The 1 kHz impedance
+  loop cannot suppress a disturbance there.
+
+Alternatives were measured and do not help: the firmware's own cascaded position and
+velocity loops (`--mode firmware:2`) limit-cycle at these current limits, and an impedance law
+closed on the host at 500 Hz is unstable on the low-inertia finger links because of the
+telemetry round trip. Treat values in the ranges above as the baseline for this hardware and
+a joint whose ripple is far above its neighbours as a mechanical finding.

@@ -126,18 +126,19 @@ pub fn is_tactile_nid(nid: u8) -> bool {
     nid % NODES_PER_BUS == 0 && (NODES_PER_BUS..=NUM_FINGERS as u8 * NODES_PER_BUS).contains(&nid)
 }
 
-/// Approximate mechanical range of a joint in radians, measured on a right hand, with a
-/// small safety margin. Thumb S1/S2 differ from the other fingers.
+/// Approximate mechanical range of a joint in radians, from positions observed on a right
+/// hand (manual posing and driven motion). The firmware has its own hard stops; these bounds
+/// only keep commanded targets within what the mechanics reach. Thumb S1/S2 differ.
 pub fn approx_limits(index: usize) -> Result<(f32, f32)> {
     let id = JointId::from_index(index)?;
     let thumb = id.finger == Finger::Thumb;
     Ok(match id.segment {
-        1 if thumb => (-1.15, 0.75),
-        1 => (-1.0, 1.4),
-        2 if thumb => (-1.25, 0.15),
-        2 => (-0.6, 0.6),
-        3 => (-1.0, 1.5),
-        _ => (-0.85, 1.5),
+        1 if thumb => (-1.25, 0.9),
+        1 => (-1.1, 1.55),
+        2 if thumb => (-1.35, 0.25),
+        2 => (-0.7, 0.7),
+        3 => (-1.15, 1.75),
+        _ => (-1.05, 1.7),
     })
 }
 

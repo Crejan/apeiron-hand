@@ -112,7 +112,7 @@ impl Hand {
     /// One complete joint snapshot from the realtime stream.
     pub async fn snapshot(&self) -> Result<JointSnapshot> {
         let stream = self.realtime_stream().await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         let mut merged: Option<JointSnapshot> = None;
         while tokio::time::Instant::now() < deadline {
             let (_, frame) = stream.recv_timeout(Duration::from_millis(500)).await?;

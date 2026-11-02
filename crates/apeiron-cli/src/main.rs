@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use apeiron_driver::commissioning::{self, CheckupOptions, TuneCriteria};
-use apeiron_driver::control::{ControlMode, Controller, Limits, Timing, TrajectorySource};
+use apeiron_driver::control::{ControlMode, Controller, FirmwareTopic, Limits, Timing, TrajectorySource};
 use apeiron_driver::hand::liveliness;
 use apeiron_driver::motion::{self, Pose, Segment, Trajectory};
 use apeiron_driver::profile::{Gains, HandProfile, DEFAULT_EFFORT_LIMIT, DEFAULT_KD, DEFAULT_KP};
@@ -33,9 +33,6 @@ struct Cli {
     poses_dir: Option<PathBuf>,
     #[arg(long, global = true)]
     profiles_dir: Option<PathBuf>,
-    /// Required by every command that enables the motors
-    #[arg(long, global = true)]
-    allow_motion: bool,
     /// Print the trajectory instead of driving it
     #[arg(long, global = true)]
     dry_run: bool,
@@ -66,9 +63,26 @@ struct Cli {
     /// Per-joint feed-forward preload, e.g. `index_S4=-0.05`
     #[arg(long, global = true, value_name = "JOINT=A")]
     bias: Vec<String>,
+    /// Coulomb friction feed-forward for all joints, A (`friction_ff · sign(v_des)` while moving)
+    #[arg(long, global = true)]
+    friction_ff: Option<f32>,
+    /// Per-joint friction feed-forward, e.g. `index_S1=0.08`
+    #[arg(long, global = true, value_name = "JOINT=A")]
+    friction: Vec<String>,
     /// Leave the motors enabled after the motion
     #[arg(long, global = true)]
     keep_enabled: bool,
+    /// Power only these joints (current limit 0 for all others), e.g. `--only ring_S1`
+    #[arg(long, global = true, value_name = "JOINT")]
+    only: Vec<String>,
+    /// Control mode: `position` (MIT law, default), `velocity`, `effort`, `impedance:KP:KD`
+    /// or `firmware:N[:topic]` (`control_mode` N, command field streamed on cmd/<topic>);
+    /// `firmware:2:velocity` drives the firmware velocity loop with a host position correction
+    #[arg(long, global = true, default_value = "position")]
+    mode: String,
+    /// Host position correction gain for `firmware:*:velocity`, 1/s
+    #[arg(long, global = true, default_value_t = 2.0)]
+    tracking_gain: f32,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -122,6 +136,9 @@ enum Cmd {
     Enable,
     Disable,
     ClearFault,
+    /// Safe state: motors off, control_mode 1 (MIT) on all joints, faults cleared,
+    /// current limit and gains back to the defaults
+    Reset,
     /// Hold the current position
     Hold {
         #[arg(long, default_value_t = 3.0)]
@@ -134,6 +151,13 @@ enum Cmd {
         secs: f32,
         #[arg(long, default_value_t = 1.0)]
         hold: f32,
+    },
+    /// Open-loop test: drive joints with a constant feed-forward current (kp = kd = 0 on
+    /// those joints, all others hold their position), e.g. `effort ring_S1=0.12 --secs 1.5`
+    Effort {
+        targets: Vec<String>,
+        #[arg(long, default_value_t = 1.5)]
+        secs: f32,
     },
     /// Drive to a pose from the pose directory (or a file)
     Pose {
@@ -222,9 +246,28 @@ enum Cmd {
         /// Feed-forward preload in A (negative values allowed, 0 removes it)
         #[arg(long, allow_negative_numbers = true)]
         effort_bias: Option<f32>,
+        /// Coulomb friction feed-forward in A (0 removes it)
+        #[arg(long)]
+        friction_ff: Option<f32>,
     },
     /// Decode a pcap/pcapng capture of hand traffic
     Pcap(pcap::PcapArgs),
+}
+
+/// Constant command for a fixed time (open-loop effort test).
+struct TimedCommand {
+    cmd: apeiron_driver::control::Command,
+    secs: f32,
+}
+
+impl apeiron_driver::control::ControlSource for TimedCommand {
+    fn command(&mut self, _: Duration, _: Option<&apeiron_driver::control::Telemetry>) -> Option<apeiron_driver::control::Command> {
+        Some(self.cmd)
+    }
+
+    fn finished(&self, t: Duration) -> bool {
+        t.as_secs_f32() > self.secs
+    }
 }
 
 fn parse_list(l: &str) -> Result<Vec<f32>> {
@@ -277,7 +320,7 @@ impl Ctx {
     }
 
     fn limits(&self) -> Limits {
-        Limits { max_effort: self.cli.max_effort, ..Limits::default() }
+        Limits { max_effort: self.cli.max_effort, tracking_gain: self.cli.tracking_gain, ..Limits::default() }
     }
 
     /// Gains: CLI overrides > profile > defaults.
@@ -310,13 +353,63 @@ impl Ctx {
             g.effort_bias[i] = b;
             desc.push_str(&format!(", bias {}={b:+}", JointId::from_index(i)?.label()));
         }
+        if !self.cli.only.is_empty() {
+            let keep: Vec<usize> =
+                self.cli.only.iter().map(|j| JointId::parse(j).map(|j| j.index())).collect::<std::result::Result<_, _>>()?;
+            for i in 0..NUM_JOINTS {
+                if !keep.contains(&i) {
+                    g.effort_limit[i] = 0.0;
+                }
+            }
+            desc.push_str(&format!(", only {}", self.cli.only.join(",")));
+        }
+        if let Some(f) = self.cli.friction_ff {
+            g.friction_ff = [f; NUM_JOINTS];
+            desc.push_str(&format!(", friction_ff {f}"));
+        }
+        for (i, f) in parse_overrides(&self.cli.friction)? {
+            g.friction_ff[i] = f;
+            desc.push_str(&format!(", friction {}={f}", JointId::from_index(i)?.label()));
+        }
         Ok((g, desc))
+    }
+
+    fn mode(&self) -> Result<ControlMode> {
+        let m = self.cli.mode.as_str();
+        Ok(match m {
+            "position" => ControlMode::Position,
+            "velocity" => ControlMode::Velocity,
+            "effort" => ControlMode::Effort,
+            _ if m.starts_with("impedance:") => {
+                let mut it = m["impedance:".len()..].split(':');
+                let kp = it.next().and_then(|v| v.parse().ok()).ok_or_else(|| Error::Other("impedance:KP:KD".into()))?;
+                let kd = it.next().and_then(|v| v.parse().ok()).ok_or_else(|| Error::Other("impedance:KP:KD".into()))?;
+                ControlMode::Impedance { kp, kd }
+            }
+            _ if m.starts_with("firmware:") => {
+                let mut it = m["firmware:".len()..].split(':');
+                let mode = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| Error::Other("firmware:N[:position|velocity|torque|current]".into()))?;
+                let topic = match it.next().unwrap_or("position") {
+                    "position" => FirmwareTopic::Position,
+                    "velocity" => FirmwareTopic::Velocity,
+                    "torque" => FirmwareTopic::Torque,
+                    "current" => FirmwareTopic::Current,
+                    o => return Err(Error::Other(format!("unknown firmware topic '{o}'"))),
+                };
+                ControlMode::Firmware { mode, topic }
+            }
+            _ => return Err(Error::Other(format!("unknown mode '{m}'"))),
+        })
     }
 
     fn controller<'a>(&self, hand: &'a Hand) -> Result<Controller<'a>> {
         let (gains, desc) = self.gains(hand)?;
-        println!("gains: {desc}");
-        let mut c = Controller::new(hand, gains).mode(ControlMode::Position).timing(self.timing()).limits(self.limits());
+        let mode = self.mode()?;
+        println!("gains: {desc}; mode {mode:?}");
+        let mut c = Controller::new(hand, gains).mode(mode).timing(self.timing()).limits(self.limits());
         c.keep_enabled = self.cli.keep_enabled;
         Ok(c)
     }
@@ -338,8 +431,14 @@ impl Ctx {
             stats.late_max_us,
             stats.overruns
         );
-        println!("reached:");
-        render::positions(&hand.positions().await?);
+        render::motion_quality(&stats.joints);
+        match hand.positions().await {
+            Ok(p) => {
+                println!("reached:");
+                render::positions(&p);
+            }
+            Err(e) => println!("reached: (no complete snapshot: {e})"),
+        }
         Ok(())
     }
 }
@@ -392,10 +491,6 @@ async fn run(ctx: Ctx) -> Result<()> {
     }
     let hand = Hand::connect(&endpoint, ctx.cli.serial.clone()).await?;
     println!("hand {} at {}", hand.serial(), endpoint);
-    if needs_motion(&ctx.cli.cmd) && !ctx.cli.allow_motion {
-        hand.close().await?;
-        return Err(Error::Other("this command moves the hand; add --allow-motion (hand free, nothing in the workspace)".into()));
-    }
     let result = dispatch(&ctx, &hand).await;
     hand.close().await?;
     result
@@ -518,6 +613,24 @@ async fn dispatch(ctx: &Ctx, hand: &Hand) -> Result<()> {
                 }
             }
         }
+        Cmd::Reset => {
+            render::set_reply("motor_disable", &hand.motor_disable().await?);
+            render::set_reply(
+                "control_mode → 1",
+                &hand
+                    .set(rel::CONTROL_MODE, apeiron_driver::protocol::encode(&vec![apeiron_driver::control::MIT_CONTROL_MODE; NUM_JOINTS])?)
+                    .await?,
+            );
+            render::set_reply("clear_fault", &hand.clear_fault().await?);
+            render::set_reply(
+                &format!("effort_limit → {}", DEFAULT_EFFORT_LIMIT),
+                &hand.set_effort_limit(&[DEFAULT_EFFORT_LIMIT; NUM_JOINTS]).await?,
+            );
+            render::set_reply(
+                &format!("mit_params → {DEFAULT_KP}/{DEFAULT_KD}"),
+                &hand.set_mit_params(&[MitParam { kp: DEFAULT_KP, kd: DEFAULT_KD }; NUM_JOINTS]).await?,
+            );
+        }
         Cmd::Enable => render::set_reply("motor_enable", &hand.motor_enable().await?),
         Cmd::Disable => render::set_reply("motor_disable", &hand.motor_disable().await?),
         Cmd::ClearFault => render::set_reply("clear_fault", &hand.clear_fault().await?),
@@ -531,6 +644,35 @@ async fn dispatch(ctx: &Ctx, hand: &Hand) -> Result<()> {
             render::positions(&pos);
         }
         Cmd::Profile { .. } => profile_cmd(ctx, hand.serial().to_string())?,
+        Cmd::Effort { targets, secs } => {
+            let start = hand.positions().await?;
+            println!("start:");
+            render::positions(&start);
+            let mut effort = [0f32; NUM_JOINTS];
+            let (mut gains, desc) = ctx.gains(hand)?;
+            for (i, a) in parse_overrides(targets)? {
+                effort[i] = a;
+                gains.mit[i] = MitParam { kp: 0.0, kd: 0.0 };
+                gains.effort_bias[i] = 0.0;
+                gains.friction_ff[i] = 0.0;
+            }
+            println!("gains: {desc}; open loop on {}", targets.join(", "));
+            if ctx.cli.dry_run {
+                return Ok(());
+            }
+            let mut c = Controller::new(hand, gains).mode(ControlMode::Position).timing(ctx.timing()).limits(ctx.limits());
+            c.keep_enabled = ctx.cli.keep_enabled;
+            let cmd = apeiron_driver::control::Command { position: start, velocity: [0.0; NUM_JOINTS], effort };
+            let stats = c.run(TimedCommand { cmd, secs: *secs }).await?;
+            render::motion_quality(&stats.joints);
+            match hand.positions().await {
+                Ok(p) => {
+                    println!("reached:");
+                    render::positions(&p);
+                }
+                Err(e) => println!("reached: (no complete snapshot: {e})"),
+            }
+        }
         Cmd::Hold { .. } | Cmd::Move { .. } | Cmd::Pose { .. } | Cmd::Sequence { .. } => {
             let start = hand.positions().await?;
             println!("start:");
@@ -627,7 +769,7 @@ async fn dispatch(ctx: &Ctx, hand: &Hand) -> Result<()> {
 }
 
 fn profile_cmd(ctx: &Ctx, serial: String) -> Result<()> {
-    let Cmd::Profile { joint, kp, kd, effort_limit, effort_bias } = &ctx.cli.cmd else { unreachable!() };
+    let Cmd::Profile { joint, kp, kd, effort_limit, effort_bias, friction_ff } = &ctx.cli.cmd else { unreachable!() };
     let mut profile = HandProfile::load_or_new(&ctx.profiles_dir, &serial);
     if let Some(j) = joint {
         let id = JointId::parse(j)?;
@@ -644,6 +786,9 @@ fn profile_cmd(ctx: &Ctx, serial: String) -> Result<()> {
         if let Some(v) = effort_bias {
             e.effort_bias = (*v != 0.0).then_some(*v);
         }
+        if let Some(v) = friction_ff {
+            e.friction_ff = (*v != 0.0).then_some(*v);
+        }
         profile.note(format!("profile set {}", id.label()));
         println!("saved {}", profile.save(&ctx.profiles_dir)?.display());
     }
@@ -656,6 +801,7 @@ fn profile_cmd(ctx: &Ctx, serial: String) -> Result<()> {
             e.kd,
             e.max_effort.map(|v| format!(" max_effort {v}")).unwrap_or_default(),
             e.effort_bias.map(|v| format!(" effort_bias {v:+}")).unwrap_or_default()
+                + &e.friction_ff.map(|v| format!(" friction_ff {v}")).unwrap_or_default()
         );
     }
     Ok(())
@@ -667,16 +813,20 @@ fn build_trajectory(ctx: &Ctx, start: &[f32; NUM_JOINTS]) -> Result<Trajectory> 
         Cmd::Hold { secs } => segments.push(Segment { goal: *start, ramp: 0.0, hold: *secs, label: "hold".into() }),
         Cmd::Move { targets, secs, hold } => {
             let mut goal = *start;
+            let mut touched = [false; NUM_JOINTS];
             for t in targets {
                 let (lhs, rhs) = t.split_once('=').ok_or_else(|| Error::Other(format!("target '{t}' is not JOINT=ANGLE")))?;
                 let angle = parse_angle(rhs)?;
                 if lhs.eq_ignore_ascii_case("all") {
                     goal = [angle; NUM_JOINTS];
+                    touched = [true; NUM_JOINTS];
                 } else {
-                    goal[JointId::parse(lhs)?.index()] = angle;
+                    let i = JointId::parse(lhs)?.index();
+                    goal[i] = angle;
+                    touched[i] = true;
                 }
             }
-            for (i, g) in goal.iter_mut().enumerate() {
+            for (i, g) in goal.iter_mut().enumerate().filter(|(i, _)| touched[*i]) {
                 let (c, clamped) = clamp_to_limits(i, *g)?;
                 if clamped {
                     println!("note: {} clamped to {c:+.3} rad", JointId::from_index(i)?.label());

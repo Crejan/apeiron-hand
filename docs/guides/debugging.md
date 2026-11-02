@@ -81,3 +81,9 @@ Buzzing or rattling with electrically quiet joints (current ripple ≈ 0.01 A) i
 backlash in individual joints, typically the fingertip segments. Find the joint with
 `telemetry` (velocity ripple) or `bias`, then store a preload for it. Lowering the
 current limit below 0.3 A makes such joints worse, not better.
+
+A hum while a base joint moves is the closed-loop velocity ripple described under
+[Motion quality](commissioning.md#motion-quality); it scales with `kd` and is not a fault.
+To separate mechanics from control, drive the joint with a constant current and no
+feedback: `apeiron effort ring_S1=0.08 --secs 1.5` (the joint runs to its end stop; 0.05 A
+does not move it, 0.08 A does). A joint that is rough open loop has a drivetrain problem.

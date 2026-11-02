@@ -273,7 +273,8 @@ impl Default for TuneCriteria {
 #[derive(Debug, Clone)]
 pub struct TuneReport {
     pub joints: BTreeMap<usize, Vec<StepMetrics>>,
-    /// Recommended (kp, kd) per joint: settled, little overshoot, quiet, smallest residual.
+    /// Recommended (kp, kd) per joint: quiet and without overshoot; settled candidates are
+    /// preferred, then the smallest residual error.
     pub recommended: BTreeMap<usize, (f32, f32)>,
 }
 
@@ -381,16 +382,19 @@ pub async fn tune(
                 max_current: w.iter().map(|s| s.current[j].abs()).fold(0.0, f32::max),
             });
         }
+        // Quiet and without overshoot is mandatory; settling within the 5 % band is preferred
+        // but not required, since a joint with gear backlash never gets that close.
         let mut candidates: Vec<&StepMetrics> = rows
             .iter()
             .filter(|r| {
-                r.settle_ms.is_some()
-                    && r.overshoot_pct <= criteria.max_overshoot_pct
+                r.overshoot_pct <= criteria.max_overshoot_pct
                     && r.current_rms <= criteria.max_current_rms
                     && r.velocity_rms <= criteria.max_velocity_rms
             })
             .collect();
-        candidates.sort_by(|a, b| a.steady_error.abs().partial_cmp(&b.steady_error.abs()).unwrap());
+        candidates.sort_by(|a, b| {
+            a.settle_ms.is_none().cmp(&b.settle_ms.is_none()).then(a.steady_error.abs().partial_cmp(&b.steady_error.abs()).unwrap())
+        });
         if let Some(best) = candidates.first() {
             report.recommended.insert(j, (best.kp, best.kd));
         }

@@ -8,7 +8,7 @@ S3 middle joint, S4 fingertip.
 
 ```sh
 apeiron poses
-apeiron --allow-motion pose victory
-apeiron --allow-motion sequence count --loop 2
-apeiron --allow-motion save-pose my_grasp --description "..."
+apeiron pose victory
+apeiron sequence count --loop 2
+apeiron save-pose my_grasp --description "..."
 ```

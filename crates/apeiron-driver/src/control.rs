@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use apeiron_protocol::encode;
 use apeiron_protocol::joint::{clamp_to_limits, NUM_JOINTS};
 use apeiron_protocol::keys::rel;
-use apeiron_protocol::messages::{JointCommand, JointCommandFrame, MitParam, RealtimeStreamEntry};
+use apeiron_protocol::messages::{JointCommand, JointCommandFrame, MitParam, RealtimeStreamEntry, ScalarCommandFrame};
 use zenoh::Wait;
 
 use crate::hand::{Hand, JointSnapshot};
@@ -95,18 +95,56 @@ pub enum ControlMode {
     Impedance { kp: f32, kd: f32 },
     /// Open-loop effort (kp = kd = 0).
     Effort,
+    /// Firmware-side loops: the joints are switched to `control_mode = mode` and one command
+    /// field is streamed as `ScalarCommandFrame` on `cmd/<topic>`. The firmware accepts modes
+    /// 0–4; 1 is the MIT law used by all other variants. Observed so far: with `cmd/position`,
+    /// modes 0, 3 and 4 do not react and mode 2 drives all joints hard – the mapping between
+    /// modes and topics is not established. Use with `--only` and small values. Mode 1 is
+    /// restored on disarm.
+    Firmware { mode: u8, topic: FirmwareTopic },
+}
+
+/// Topic (and command field) used by [`ControlMode::Firmware`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirmwareTopic {
+    Position,
+    Velocity,
+    Torque,
+    Current,
+}
+
+impl FirmwareTopic {
+    fn key(self) -> &'static str {
+        match self {
+            FirmwareTopic::Position => rel::CMD_POSITION,
+            FirmwareTopic::Velocity => rel::CMD_VELOCITY,
+            FirmwareTopic::Torque => rel::CMD_TORQUE,
+            FirmwareTopic::Current => rel::CMD_CURRENT,
+        }
+    }
 }
 
 impl ControlMode {
     fn gains(self, profile: &Gains) -> [MitParam; NUM_JOINTS] {
         match self {
-            ControlMode::Position => profile.mit,
+            ControlMode::Position | ControlMode::Firmware { .. } => profile.mit,
             ControlMode::Velocity => std::array::from_fn(|i| MitParam { kp: 0.0, kd: profile.mit[i].kd }),
             ControlMode::Impedance { kp, kd } => [MitParam { kp, kd }; NUM_JOINTS],
             ControlMode::Effort => [MitParam { kp: 0.0, kd: 0.0 }; NUM_JOINTS],
         }
     }
+
+    /// Firmware `control_mode` value this mode needs on every joint.
+    fn firmware_mode(self) -> u8 {
+        match self {
+            ControlMode::Firmware { mode, .. } => mode,
+            _ => MIT_CONTROL_MODE,
+        }
+    }
 }
+
+/// `control_mode` value under which the firmware applies the MIT law to `joint_command`.
+pub const MIT_CONTROL_MODE: u8 = 1;
 
 /// Timing options of the sender thread.
 #[derive(Debug, Clone, Copy)]
@@ -137,15 +175,18 @@ pub struct Limits {
     /// Read both encoders of every joint before enabling and disable joints with a frozen
     /// joint encoder (costs about a second).
     pub check_encoders: bool,
+    /// Host-side position correction used with `ControlMode::Firmware` on the velocity topic:
+    /// `v_cmd = v_des + tracking_gain · (q_des − q)`, 1/s. 0 disables the correction.
+    pub tracking_gain: f32,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { clamp_positions: true, max_velocity: 3.0, max_effort: 0.3, check_encoders: true }
+        Limits { clamp_positions: true, max_velocity: 3.0, max_effort: 0.3, check_encoders: true, tracking_gain: 2.0 }
     }
 }
 
-/// Timing statistics of a finished run.
+/// Timing statistics of a finished run plus per-joint motion quality.
 #[derive(Debug, Clone, Default)]
 pub struct RunStats {
     pub sent: u64,
@@ -154,6 +195,31 @@ pub struct RunStats {
     pub late_p99_us: f64,
     pub late_max_us: f64,
     pub overruns: u64,
+    /// Filled by [`Controller::run`]; empty for loops started with [`Controller::start`].
+    pub joints: Vec<JointQuality>,
+}
+
+/// Motion quality of one joint over a run, from the 1 kHz telemetry.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JointQuality {
+    /// Samples in which the target velocity exceeded the dead band.
+    pub moving_samples: u32,
+    /// Mean target velocity while moving, rad/s.
+    pub target_velocity: f32,
+    /// RMS of (measured − target velocity) while moving, rad/s. Smooth tracking stays well
+    /// below the target velocity; stick-slip and gear roughness show up as values of the
+    /// same order as the target velocity.
+    pub velocity_ripple: f32,
+    /// RMS of the current around its mean while moving, A.
+    pub current_ripple: f32,
+    /// Peak |current| over the whole run, A.
+    pub peak_current: f32,
+    /// RMS of (measured − target position) while moving, rad. Stick-slip shows up as a
+    /// sawtooth of amplitude ≈ breakaway effort / kp.
+    pub position_error: f32,
+    /// RMS of the measured velocity while the target velocity is zero, rad/s: the sensor
+    /// noise floor that `velocity_ripple` cannot fall below.
+    pub rest_velocity_noise: f32,
 }
 
 /// Shared state between middleware and the sender thread.
@@ -161,6 +227,7 @@ struct Shared {
     command: RwLock<Command>,
     telemetry: RwLock<Option<Telemetry>>,
     bias: RwLock<[f32; NUM_JOINTS]>,
+    friction_ff: [f32; NUM_JOINTS],
     stop: AtomicBool,
     frames: AtomicU64,
     telemetry_version: AtomicU64,
@@ -281,27 +348,40 @@ impl<'a> Controller<'a> {
         }
         check(hand.set_effort_limit(&limits).await?, "effort_limit")?;
         check(hand.set_mit_params(&self.mode.gains(&self.gains)).await?, "mit_params")?;
+        check(hand.set(rel::CONTROL_MODE, encode(&vec![self.mode.firmware_mode(); NUM_JOINTS])?).await?, "control_mode")?;
         check(hand.clear_fault().await?, "clear_fault")?;
         check(hand.motor_enable().await?, "motor_enable")?;
         Ok(())
     }
 
-    /// Switch the control mode while running (rewrites `mit_params`).
+    /// Switch the control mode while running (rewrites `mit_params` and `control_mode`).
+    /// Switching between a `Firmware` mode and the MIT modes also changes the command topic,
+    /// so it only takes effect for loops started afterwards.
     pub async fn switch_mode(&mut self, mode: ControlMode) -> Result<()> {
         self.mode = mode;
-        check(self.hand.set_mit_params(&mode.gains(&self.gains)).await?, "mit_params")
+        check(self.hand.set_mit_params(&mode.gains(&self.gains)).await?, "mit_params")?;
+        check(self.hand.set(rel::CONTROL_MODE, encode(&vec![mode.firmware_mode(); NUM_JOINTS])?).await?, "control_mode")
     }
 
+    /// Disable the motors and put the joints back into MIT mode.
     pub async fn disarm(&self) -> Result<()> {
-        check(self.hand.motor_disable().await?, "motor_disable")
+        check(self.hand.motor_disable().await?, "motor_disable")?;
+        if self.mode.firmware_mode() != MIT_CONTROL_MODE {
+            check(self.hand.set(rel::CONTROL_MODE, encode(&vec![MIT_CONTROL_MODE; NUM_JOINTS])?).await?, "control_mode")?;
+        }
+        Ok(())
     }
 
     /// Run `source` until it reports `finished` or the handle is stopped. Arms before and
     /// disarms after (unless `keep_enabled`). Returns timing statistics.
     pub async fn run<S: ControlSource>(&self, source: S) -> Result<RunStats> {
         let (handle, stats) = self.spawn(Some(Box::new(source))).await?;
-        let stats = stats.await.map_err(|e| Error::Other(format!("sender thread: {e}")))??;
+        let quality = tokio::spawn(collect_quality(handle.clone()));
+        let mut stats = stats.await.map_err(|e| Error::Other(format!("sender thread: {e}")))??;
         handle.stop();
+        if let Ok(q) = quality.await {
+            stats.joints = q;
+        }
         if !self.keep_enabled {
             self.disarm().await?;
         }
@@ -321,6 +401,7 @@ impl<'a> Controller<'a> {
             command: RwLock::new(Command::hold(start)),
             telemetry: RwLock::new(None),
             bias: RwLock::new(self.gains.effort_bias),
+            friction_ff: self.gains.friction_ff,
             stop: AtomicBool::new(false),
             frames: AtomicU64::new(0),
             telemetry_version: AtomicU64::new(0),
@@ -349,9 +430,14 @@ impl<'a> Controller<'a> {
             });
         }
 
+        let firmware = match self.mode {
+            ControlMode::Firmware { topic, .. } => Some(topic),
+            _ => None,
+        };
         let sender = Sender {
             session: self.hand.session().clone(),
-            key: self.hand.key(rel::JOINT_COMMAND),
+            key: self.hand.key(firmware.map(FirmwareTopic::key).unwrap_or(rel::JOINT_COMMAND)),
+            firmware,
             shared,
             source: Mutex::new(source),
             timing: self.timing,
@@ -361,6 +447,55 @@ impl<'a> Controller<'a> {
         let join = tokio::task::spawn_blocking(move || sender.run());
         Ok((handle, join))
     }
+}
+
+/// Accumulate [`JointQuality`] from telemetry until the handle stops.
+async fn collect_quality(handle: ControlHandle) -> Vec<JointQuality> {
+    const DEAD_BAND: f32 = 0.02;
+    let mut n = [0u32; NUM_JOINTS];
+    let mut sum_v = [0f64; NUM_JOINTS];
+    let mut sum_e2 = [0f64; NUM_JOINTS];
+    let mut sum_i = [0f64; NUM_JOINTS];
+    let mut sum_i2 = [0f64; NUM_JOINTS];
+    let mut sum_q2 = [0f64; NUM_JOINTS];
+    let mut n_rest = [0u32; NUM_JOINTS];
+    let mut sum_rest2 = [0f64; NUM_JOINTS];
+    let mut peak = [0f32; NUM_JOINTS];
+    while let Some(t) = handle.next_telemetry().await {
+        let cmd = handle.command();
+        for i in 0..NUM_JOINTS {
+            peak[i] = peak[i].max(t.current[i].abs());
+            if !t.velocity[i].is_finite() {
+                continue;
+            }
+            if cmd.velocity[i].abs() > DEAD_BAND {
+                n[i] += 1;
+                sum_v[i] += cmd.velocity[i].abs() as f64;
+                sum_e2[i] += ((t.velocity[i] - cmd.velocity[i]) as f64).powi(2);
+                sum_q2[i] += ((t.position[i] - cmd.position[i]) as f64).powi(2);
+                sum_i[i] += t.current[i] as f64;
+                sum_i2[i] += (t.current[i] as f64).powi(2);
+            } else if cmd.velocity[i] == 0.0 {
+                n_rest[i] += 1;
+                sum_rest2[i] += (t.velocity[i] as f64).powi(2);
+            }
+        }
+    }
+    (0..NUM_JOINTS)
+        .map(|i| {
+            let k = n[i].max(1) as f64;
+            let mean_i = sum_i[i] / k;
+            JointQuality {
+                moving_samples: n[i],
+                target_velocity: (sum_v[i] / k) as f32,
+                velocity_ripple: (sum_e2[i] / k).sqrt() as f32,
+                current_ripple: (sum_i2[i] / k - mean_i * mean_i).max(0.0).sqrt() as f32,
+                peak_current: peak[i],
+                position_error: (sum_q2[i] / k).sqrt() as f32,
+                rest_velocity_noise: (sum_rest2[i] / n_rest[i].max(1) as f64).sqrt() as f32,
+            }
+        })
+        .collect()
 }
 
 fn check(reply: apeiron_protocol::messages::SetReply, what: &str) -> Result<()> {
@@ -374,6 +509,8 @@ fn check(reply: apeiron_protocol::messages::SetReply, what: &str) -> Result<()> 
 struct Sender {
     session: zenoh::Session,
     key: String,
+    /// Publish one command field as `ScalarCommandFrame` on `cmd/<topic>` instead of MIT frames.
+    firmware: Option<FirmwareTopic>,
     shared: Arc<Shared>,
     source: Mutex<Option<Box<dyn ControlSource>>>,
     timing: Timing,
@@ -423,14 +560,45 @@ impl Sender {
                 } else {
                     cmd.position[i]
                 };
+                let velocity = cmd.velocity[i].clamp(-self.limits.max_velocity, self.limits.max_velocity);
+                // Coulomb friction feed-forward follows the sign of the target velocity; a small
+                // dead band keeps it off while holding.
+                let friction = if velocity.abs() > 0.02 { self.shared.friction_ff[i] * velocity.signum() } else { 0.0 };
                 JointCommand {
                     position,
-                    velocity: cmd.velocity[i].clamp(-self.limits.max_velocity, self.limits.max_velocity),
-                    effort: (cmd.effort[i] + bias[i]).clamp(-self.limits.max_effort, self.limits.max_effort),
+                    velocity,
+                    effort: (cmd.effort[i] + bias[i] + friction).clamp(-self.limits.max_effort, self.limits.max_effort),
                 }
             });
             seq = seq.wrapping_add(1);
-            publisher.put(encode(&JointCommandFrame::new(seq, joints))?).wait()?;
+            let bytes = match self.firmware {
+                Some(FirmwareTopic::Velocity) => {
+                    // Firmware velocity loop plus a soft position correction from telemetry.
+                    let q = self.shared.telemetry.read().unwrap().as_ref().map(|t| t.position);
+                    let v: Vec<f32> = joints
+                        .iter()
+                        .enumerate()
+                        .map(|(i, j)| {
+                            let corr = match q {
+                                Some(q) if q[i].is_finite() => self.limits.tracking_gain * (j.position - q[i]),
+                                _ => 0.0,
+                            };
+                            (j.velocity + corr).clamp(-self.limits.max_velocity, self.limits.max_velocity)
+                        })
+                        .collect();
+                    encode(&ScalarCommandFrame { seq, joints: v })?
+                }
+                Some(topic) => {
+                    let field = |j: &JointCommand| match topic {
+                        FirmwareTopic::Position => j.position,
+                        FirmwareTopic::Torque | FirmwareTopic::Current => j.effort,
+                        FirmwareTopic::Velocity => unreachable!(),
+                    };
+                    encode(&ScalarCommandFrame { seq, joints: joints.iter().map(field).collect() })?
+                }
+                None => encode(&JointCommandFrame::new(seq, joints))?,
+            };
+            publisher.put(bytes).wait()?;
             self.shared.frames.fetch_add(1, Ordering::Relaxed);
             next += period_ns;
             let now = rt::now_ns();
@@ -452,6 +620,7 @@ impl Sender {
             late_p99_us: p99,
             late_max_us: late.iter().cloned().fold(0.0, f64::max),
             overruns,
+            joints: Vec::new(),
         })
     }
 }
